@@ -4,6 +4,8 @@ const dotenv = require('dotenv');
 const AWS = require('aws-sdk');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
 
 dotenv.config();
 
@@ -21,6 +23,11 @@ AWS.config.update({
 const dynamodb = new AWS.DynamoDB();
 const docClient = new AWS.DynamoDB.DocumentClient();
 const JWT_SECRET = process.env.JWT_SECRET || 'perfy_secret_123';
+
+const razorpay = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET
+});
 
 // Table Definitions
 const tables = [
@@ -102,6 +109,84 @@ router.post('/auth/login', async (req, res) => {
         
         const { password: _, ...userData } = user;
         res.json({ token, user: userData });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Company Registration with Payment Verification
+router.post('/auth/register-company', async (req, res) => {
+    const { 
+        name, address, type, industry, employeeCount, 
+        ownerName, email, password, gstin,
+        razorpay_payment_id, razorpay_order_id, razorpay_signature 
+    } = req.body;
+
+    try {
+        // Verify Razorpay Signature (Optional but recommended)
+        if (razorpay_payment_id && razorpay_signature) {
+            const body = razorpay_order_id + "|" + razorpay_payment_id;
+            const expectedSignature = crypto
+                .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+                .update(body.toString())
+                .digest("hex");
+            
+            if (expectedSignature !== razorpay_signature) {
+                return res.status(400).json({ message: "Invalid payment signature" });
+            }
+        }
+
+        // Create Company
+        const companyId = `c${Math.floor(Math.random() * 1000000)}`;
+        const company = {
+            id: companyId,
+            name,
+            address,
+            type,
+            industry,
+            gstin,
+            maxEmployees: parseInt(employeeCount) || 0,
+            employeeCount: 0,
+            testsCompleted: 0,
+            testsPending: 0,
+            avgScore: 0,
+            createdAt: new Date().toISOString(),
+            uniqueCode: name.substring(0, 3).toUpperCase() + new Date().getFullYear(),
+            paymentId: razorpay_payment_id
+        };
+
+        // Create Admin User
+        const adminUser = {
+            id: `u${Math.floor(Math.random() * 1000000)}`,
+            name: ownerName,
+            email,
+            password: await bcrypt.hash(password, 10),
+            role: 'company_admin',
+            companyId: companyId,
+            companyName: name,
+            createdAt: new Date().toISOString()
+        };
+
+        await docClient.put({ TableName: "Perfy_Companies", Item: company }).promise();
+        await docClient.put({ TableName: "Perfy_Users", Item: adminUser }).promise();
+
+        res.status(201).json({ message: "Company registered successfully", companyId });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Create Razorpay Order
+router.post('/payments/create-order', async (req, res) => {
+    const { amount } = req.body; // Amount in INR
+    try {
+        const options = {
+            amount: amount * 100, // convert to paise
+            currency: "INR",
+            receipt: `rcpt_${Math.floor(Math.random() * 1000000)}`
+        };
+        const order = await razorpay.orders.create(options);
+        res.json({ ...order, key_id: process.env.RAZORPAY_KEY_ID });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -238,6 +323,14 @@ router.post('/employees', authenticateToken, async (req, res) => {
     };
 
     try {
+        // Check Quota
+        const companyRes = await docClient.get({ TableName: "Perfy_Companies", Key: { id: companyId } }).promise();
+        const company = companyRes.Item;
+        
+        if (company && company.maxEmployees && company.employeeCount >= company.maxEmployees) {
+            return res.status(403).json({ message: `Employee quota reached (${company.maxEmployees}). Please upgrade your plan.` });
+        }
+
         await docClient.put({ TableName: "Perfy_Users", Item: employee }).promise();
         
         // Update employee count in company table
