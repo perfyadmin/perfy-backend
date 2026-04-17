@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 dotenv.config();
 
@@ -27,6 +28,26 @@ const JWT_SECRET = process.env.JWT_SECRET || 'perfy_secret_123';
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
     key_secret: process.env.RAZORPAY_KEY_SECRET
+});
+
+// Configure Nodemailer
+const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT, // 587
+    secure: false, // true for 465, false for other ports
+    auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS.replace(/"/g, '') // remove quotes if any
+    }
+});
+
+// Verify mail config
+transporter.verify((error, success) => {
+    if (error) {
+        console.error("Transporter connection error:", error);
+    } else {
+        console.log("Mail server is ready to take messages");
+    }
 });
 
 // Table Definitions
@@ -111,6 +132,64 @@ router.post('/auth/login', async (req, res) => {
         res.json({ token, user: userData });
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+// Lead Submission & Automated Emails
+router.post('/leads', async (req, res) => {
+    const { name, email, phone, organization, message, intent, productContext } = req.body;
+
+    try {
+        const adminMailOptions = {
+            from: `"${process.env.FROM_NAME}" <${process.env.SMTP_USER}>`,
+            to: process.env.ADMIN_EMAIL,
+            subject: `[Perfy Lead] ${intent}${productContext ? " — " + productContext : ""}`,
+            html: `
+                <div style="font-family: sans-serif; padding: 20px; color: #333;">
+                    <h2 style="color: #6366f1;">New Lead Request</h2>
+                    <p><strong>Intent:</strong> ${intent}</p>
+                    ${productContext ? `<p><strong>Product:</strong> ${productContext}</p>` : ''}
+                    <hr style="border: 0; border-top: 1px solid #eee;" />
+                    <p><strong>Name:</strong> ${name}</p>
+                    <p><strong>Email:</strong> ${email}</p>
+                    <p><strong>Phone:</strong> ${phone}</p>
+                    <p><strong>Organization:</strong> ${organization || '—'}</p>
+                    <p><strong>Message:</strong></p>
+                    <p style="background: #f9fafb; padding: 15px; border-radius: 8px;">${message || '—'}</p>
+                    <br />
+                    <p style="font-size: 12px; color: #666;">Sent from Perfy Landing Page</p>
+                </div>
+            `
+        };
+
+        const userMailOptions = {
+            from: `"${process.env.FROM_NAME}" <${process.env.SMTP_USER}>`,
+            to: email,
+            subject: `Thank you for your interest in Perfy`,
+            html: `
+                <div style="font-family: sans-serif; padding: 20px; color: #333; line-height: 1.6;">
+                    <h2 style="color: #6366f1;">Hello ${name},</h2>
+                    <p>Thank you for reaching out to us regarding <strong>${intent}</strong>.</p>
+                    <p>We have received your request and our team will get back to you within 24 hours.</p>
+                    ${productContext ? `<p>Our experts are preparing the details for the <strong>${productContext}</strong> demo you requested.</p>` : ''}
+                    <br />
+                    <p>Best Regards,<br /><strong>The Perfy Team</strong></p>
+                    <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;" />
+                    <p style="font-size: 12px; color: #666;">This is an automated confirmation. Please do not reply to this email.</p>
+                </div>
+            `
+        };
+
+        // Send to Admin
+        await transporter.sendMail(adminMailOptions);
+        
+        // Send Confirmation to User
+        await transporter.sendMail(userMailOptions);
+
+        res.status(200).json({ message: "Lead submitted and emails sent successfully" });
+    } catch (error) {
+        console.error("Mail error:", error);
+        res.status(500).json({ message: "Failed to send emails. Please try again later." });
     }
 });
 
